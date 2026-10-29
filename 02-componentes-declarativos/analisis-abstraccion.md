@@ -1,22 +1,5 @@
 # Análisis de la Abstracción — Fase 2
 
-## TODO 1: `redisHost` con el DNS de Kubernetes
-
-`kubectl get svc -n redis` mostró que el chart de Bitnami crea tres Services:
-
-```text
-NAME             TYPE        CLUSTER-IP     PORT(S)
-redis-headless   ClusterIP   None           6379/TCP
-redis-master     ClusterIP   10.96.99.154   6379/TCP
-redis-replicas   ClusterIP   10.96.27.90    6379/TCP
-```
-
-Configuré `redisHost: "redis-master.redis.svc.cluster.local:6379"`. Elegí **`redis-master`** porque el componente `pubsub.redis` de Dapr usa **Redis Streams** (`XADD`, `XREADGROUP`, `XACK`), que requieren escritura, y las réplicas son de solo lectura. El headless service tampoco me sirve, porque resuelve a las IPs de cada Pod en lugar de una IP estable. Usé el FQDN completo (y no solo `redis-master.redis`) para que la resolución no dependa del `search` de `/etc/resolv.conf` del Pod.
-
-Lo verifiqué con `kubectl get components.dapr.io order-pubsub -o yaml` y, de forma más contundente, inspeccionando el broker después de publicar. El stream `orders` y el consumer group `order-subscriber` existían en Redis sin que el código Python mencionara Redis en ningún momento.
-
----
-
 ## TODO 2: Análisis de la Abstracción
 
 ### 1. Migración de broker: ¿qué archivos cambiarían?
@@ -57,13 +40,8 @@ En todos los casos el campo que cambia es **`spec.type`**, junto con el bloque `
 | Redis Streams | `pubsub.redis` | `redisHost`, `consumerID`, `streamTTL` |
 | Apache Kafka | `pubsub.kafka` | `brokers`, `consumerGroup`, `authType` |
 | RabbitMQ | `pubsub.rabbitmq` | `connectionString`, `durable`, `deliveryMode` |
-| NATS JetStream | `pubsub.jetstream` | `natsURL`, `durableName`, `queueGroupName` |
 | Azure Service Bus (Topics) | `pubsub.azure.servicebus.topics` | `connectionString`, `defaultMessageTimeToLiveInSec` |
 | AWS SNS/SQS | `pubsub.aws.snssqs` | `region`, `messageRetentionPeriod` |
-| GCP Pub/Sub | `pubsub.gcp.pubsub` | `projectId`, `maxDeliveryAttempts` |
-| Apache Pulsar | `pubsub.pulsar` | `host`, `consumerID` |
-
-Incluí más de cinco a propósito: el catálogo cubre brokers *self-hosted* y los servicios gestionados de los tres hyperscalers, que es justamente lo que hace atractiva la abstracción para una plataforma multi-nube.
 
 ### 3. Manejo seguro de secretos en producción
 
@@ -93,6 +71,3 @@ Funciona así:
 - En Kubernetes, Dapr carga automáticamente un secret store llamado `kubernetes` (`secretstores.kubernetes`) que lee `Secret` nativos del mismo namespace. Lo confirmé consultando `GET /v1.0/metadata` en el sidecar del subscriber: aparece cargado junto a `order-pubsub` sin que yo lo declarara.
 - Para producción, en lugar de `kubernetes` uso un secret store respaldado por un gestor dedicado: **HashiCorp Vault** (`secretstores.hashicorp.vault`), **Azure Key Vault**, **AWS Secrets Manager** o **GCP Secret Manager**. Cambiar de gestor es, de nuevo, solo cambiar un componente.
 - El sidecar resuelve la referencia **en runtime**, al cargar el componente. El secreto nunca pasa por Git ni por el código de la app.
-- Además, con `Configuration.spec.secrets.scopes` puedo restringir qué secretos puede leer cada app-id con la API de secretos (`defaultAccess: deny` + `allowedSecrets`). Esto aplica mínimo privilegio también al acceso programático.
-
-Como complemento operativo, combinaría esto con **External Secrets Operator** o **Sealed Secrets** para que el ciclo de vida del secreto (rotación, auditoría) quede en manos del equipo de seguridad. Así el repositorio GitOps conserva solo referencias.

@@ -41,8 +41,7 @@ El código de la aplicación **nunca conoce la existencia de Redis**. Se comunic
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── subscriber-deployment.yaml   ← Deployment K8s (requiere completar anotaciones Dapr)
-├── publisher-job.yaml           ← Job K8s (completo, usar como referencia)
-└── tracing-config.yaml          ← Configuration Dapr que agregué para poblar el traceparent
+└── publisher-job.yaml           ← Job K8s (completo, usar como referencia)
 ```
 
 ---
@@ -72,9 +71,6 @@ docker exec -it dapr-lab-control-plane crictl images | grep order
 ---
 
 ## 3.4 Desplegar el Subscriber
-
-> **Nota de mi solución:** antes de desplegar aplico la Configuration de tracing que referencian ambos Pods:
-> `kubectl apply -f 03-aplicaciones/tracing-config.yaml`
 
 > **Importante:** Completa el TODO 1 en `subscriber-deployment.yaml` antes de aplicarlo.
 

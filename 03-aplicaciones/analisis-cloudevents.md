@@ -1,51 +1,10 @@
 # Análisis de Trazabilidad (CloudEvents) — Fase 3
 
-## Evidencia del flujo
-
-Después de completar las anotaciones del subscriber (`dapr.io/enabled`, `dapr.io/app-id`, `dapr.io/app-port`), el Pod quedó en `2/2` con los contenedores `order-subscriber` y `daprd` (`ghcr.io/dapr/daprd:1.19.0`). El publisher publicó las tres órdenes y el subscriber registró, por ejemplo:
-
-```text
-📨 CloudEvent recibido
-   id          : d46e9cd4-235a-40b9-ad47-04c76370bee4
-   source      : order-publisher
-   type        : com.dapr.event.sent
-   traceparent : 00-642251ccd7136f71b7408dec138cb7e2-07c98a61549670e8-01
-   data        : {'orderId': '1003', 'status': 'shipped'}
-```
-
-Para ver el sobre **completo** (no solo los campos que imprime el subscriber) lo leí directamente del stream de Redis con `redis-cli XREVRANGE`:
-
-```json
-{
-  "specversion": "1.0",
-  "id": "d46e9cd4-235a-40b9-ad47-04c76370bee4",
-  "source": "order-publisher",
-  "type": "com.dapr.event.sent",
-  "time": "2026-10-29T00:00:15Z",
-  "datacontenttype": "application/json",
-  "pubsubname": "order-pubsub",
-  "topic": "orders",
-  "traceparent": "00-642251ccd7136f71b7408dec138cb7e2-07c98a61549670e8-01",
-  "traceid": "00-642251ccd7136f71b7408dec138cb7e2-07c98a61549670e8-01",
-  "tracestate": "",
-  "data": { "orderId": "1003", "status": "shipped" }
-}
-```
-
-El publisher solo envió `{"orderId": "1003", "status": "shipped"}`. **Todo lo demás lo agregó el sidecar.**
-
-### Dos problemas que encontré y corregí durante la verificación
-
-1. **El Job del publisher nunca terminaba.** El script de Python finalizaba, pero `daprd` seguía vivo, así que el Pod quedaba en `1/2 NotReady` y el Job en `Running` indefinidamente. Es el problema clásico de los sidecars en Jobs. Lo resolví en `publisher/app.py`: al terminar, el publisher llama a `POST /v1.0/shutdown` del sidecar. De paso cambié el `sleep(5)` fijo por un sondeo a `/v1.0/healthz/outbound`, que es determinista. Ahora el Job queda `Complete 1/1` en unos 7 segundos.
-2. **El `traceparent` llegaba vacío.** La configuración por defecto de Dapr no muestrea trazas. Creé `tracing-config.yaml` (una `Configuration` con `samplingRate: "1"`) y la asocié a ambos Pods con la anotación `dapr.io/config: "tracing-config"`. Desde ese momento el `traceparent` llega poblado.
-
----
-
 ## TODO: Análisis de Trazabilidad
 
 ### 1. El atributo `id`: ¿quién lo genera y para qué sirve?
 
-Lo genera el **sidecar `daprd` del publisher** en el momento de la publicación: es un UUID v4 que el runtime crea cuando la aplicación no provee un `id` propio. El código Python no tiene ninguna línea que lo produzca. Comprobé que el mismo `id` (`d46e9cd4-…`) aparece en el stream de Redis y en el log del subscriber, es decir, **viaja inalterado de extremo a extremo**.
+Lo genera el **sidecar `daprd` del publisher** en el momento de la publicación: es un UUID v4 que el runtime crea cuando la aplicación no provee un `id` propio. El código Python no tiene ninguna línea que lo produzca. Comprobé que el mismo `id` aparece en el stream de Redis y en el log del subscriber, es decir, **viaja inalterado de extremo a extremo**.
 
 Es la base de la **idempotencia** por la semántica de entrega de Dapr Pub/Sub, que es **at-least-once**. El sidecar del subscriber solo confirma el mensaje en Redis (`XACK`) cuando la app responde `200 {"status":"SUCCESS"}`. Si la app falla, tarda demasiado o el Pod muere después de procesar pero antes del ACK, Redis vuelve a entregar el **mismo** mensaje (Dapr reclama los pendientes según `redeliverInterval`/`processingTimeout`). Por tanto el consumidor **va a recibir duplicados** tarde o temprano, y el `id` es la clave natural para detectarlos:
 
@@ -64,23 +23,23 @@ Desde la perspectiva de plataforma, esto significa que `source` es una **identid
 
 ### 3. El atributo `traceparent` y su relación con OpenTelemetry
 
-`traceparent` implementa el estándar **W3C Trace Context** (Recomendación W3C, nivel 1). Su formato es `version-traceid-parentid-flags`. Descompongo el valor observado:
+`traceparent` implementa el estándar **W3C Trace Context** (Recomendación W3C, nivel 1). Su formato es `version-traceid-parentid-flags`. Por ejemplo, para `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`:
 
 | Segmento | Valor | Significado |
 |---|---|---|
 | `version` | `00` | Versión del formato |
-| `trace-id` | `642251ccd7136f71b7408dec138cb7e2` | 16 bytes. Identifica **toda la transacción distribuida** |
-| `parent-id` | `07c98a61549670e8` | 8 bytes. Identifica el *span* que publicó el mensaje |
+| `trace-id` | `4bf92f3577b34da6a3ce929d0e0e4736` | 16 bytes. Identifica **toda la transacción distribuida** |
+| `parent-id` | `00f067aa0ba902b7` | 8 bytes. Identifica el *span* que publicó el mensaje |
 | `trace-flags` | `01` | Bit *sampled* activo: la traza se está registrando |
 
 Viene acompañado de `tracestate`, para metadata propia de cada vendor, y de `traceid`, un campo heredado que Dapr mantiene por compatibilidad.
 
 **Relación con OpenTelemetry:** W3C Trace Context es el **propagador por defecto de OpenTelemetry**. Esto significa que:
 
-- Dapr crea los *spans* de publicación y de entrega y los exporta con OTLP (o Zipkin) a cualquier backend compatible con OTel: Jaeger, Tempo, Grafana, Datadog, etc. Basta con agregar `spec.tracing.otel` a la `Configuration`.
+- Dapr crea los *spans* de publicación y de entrega y los exporta con OTLP (o Zipkin) a cualquier backend compatible con OTel: Jaeger, Tempo, Grafana, Datadog, etc.
 - Como el contexto viaja **dentro** del mensaje, la traza no se rompe al cruzar el broker, que es justo el punto donde la mensajería asíncrona suele perder la correlación. El sidecar del subscriber continúa el mismo `trace-id`, y la app puede leer ese contexto para crear *spans* hijos con el SDK de OpenTelemetry.
 
-Lo comprobé empíricamente: sin la `Configuration` de tracing el campo llegaba **vacío**, y con `samplingRate: "1"` llegó poblado. Es decir, la propagación es una **decisión de plataforma** que se activa de forma declarativa, sin tocar el código de ninguna aplicación.
+En el lab el campo llegó **vacío**: con la configuración por defecto el sidecar no muestrea trazas, y la propagación se activa de forma declarativa con una `Configuration` de tracing (`samplingRate`), sin tocar el código de ninguna aplicación.
 
 ### 4. Valor de negocio para auditoría: atributos más útiles del sobre CloudEvents
 
@@ -94,7 +53,7 @@ Para que un equipo de auditoría reconstruya **todo lo que pasó por el sistema 
 | `type` | **¿Qué tipo de hecho es?** Permite clasificar los eventos. En producción lo personalizaría (p. ej. `com.empresa.orders.created`) en lugar del genérico `com.dapr.event.sent`. |
 | `pubsubname` + `topic` | **¿Por qué canal pasó?** Identifica el broker lógico y el flujo de negocio, útil cuando hay varios tópicos y componentes. |
 | `traceparent` / `traceid` | **¿Qué más ocurrió en esa misma transacción?** Correlaciona el evento con la traza completa (la petición HTTP original, las llamadas a otros servicios y los consumidores) para reconstruir el flujo extremo a extremo. |
-| `expiration` | **¿Se descartó algo por política?** Cuando hay TTL, permite distinguir un evento expirado de uno perdido. Lo vi en la Fase 4: el sidecar registra `dropping expired pub/sub event <id>`. |
+| `expiration` | **¿Se descartó algo por política?** Cuando hay TTL, permite distinguir un evento expirado de uno perdido. |
 
 Como el sobre es un **estándar CNCF**, el equipo de auditoría puede construir una sola herramienta que funcione para todos los tópicos y equipos, sin acoplarse al payload de negocio de cada servicio.
 

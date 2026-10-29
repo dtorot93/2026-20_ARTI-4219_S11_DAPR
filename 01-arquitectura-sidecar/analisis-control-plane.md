@@ -1,33 +1,5 @@
 # Análisis del Plano de Control de Dapr — Fase 1
 
-> **Entorno donde validé las respuestas:** clúster Kind `dapr-lab` (Kubernetes v1.35.0 sobre Docker Desktop, arm64), Dapr **1.19.0** instalado con el chart oficial de Helm (`dapr-1.19.0`) en el namespace `dapr-system`.
-
-Antes de responder dejo la evidencia que obtuve con `kubectl get pods -n dapr-system -o wide` y `kubectl get deploy,statefulset -n dapr-system`:
-
-```text
-NAME                                    READY   STATUS    RESTARTS
-dapr-operator-67f5fc97bb-682jp          1/1     Running   1
-dapr-placement-server-0                 1/1     Running   0
-dapr-scheduler-server-0                 1/1     Running   0
-dapr-scheduler-server-1                 1/1     Running   0
-dapr-scheduler-server-2                 1/1     Running   0
-dapr-sentry-59745df598-qj9gg            1/1     Running   0
-dapr-sidecar-injector-8b9bff8d5-jz5js   1/1     Running   0
-
-deployment.apps/dapr-operator           1/1
-deployment.apps/dapr-sentry             1/1
-deployment.apps/dapr-sidecar-injector   1/1
-statefulset.apps/dapr-placement-server  1/1
-statefulset.apps/dapr-scheduler-server  3/3
-```
-
-Hay dos diferencias frente a la salida esperada de la guía:
-
-- El pod que la guía llama `dapr-sentinels` en realidad se llama **`dapr-sentry`**. No es un servicio de health: es la **autoridad certificadora (CA)** del plano de control. Emite los certificados X.509 (SPIFFE) con los que cada sidecar se autentica por mTLS.
-- En la versión 1.19 el chart ya **no instala `dapr-dashboard`** por defecto. En cambio aparece **`dapr-scheduler-server`**, un StatefulSet de 3 réplicas con etcd embebido que persiste jobs, reminders de actores y timers de workflows (existe desde Dapr 1.14).
-
----
-
 ## TODO 1: Análisis del Plano de Control
 
 ### 1. ¿Qué tipo de objeto de Kubernetes es el `dapr-sidecar-injector`?
@@ -52,11 +24,6 @@ webhooks:
 
 **¿Por qué debe ser *Mutating* y no *Validating*?** Un `ValidatingWebhook` solo puede aceptar o rechazar un objeto, mientras que la inyección necesita **modificar** el `PodSpec` antes de que llegue a etcd. El injector responde al `AdmissionReview` con un JSON Patch que agrega el contenedor `daprd` con sus puertos (3500 HTTP, 50001 gRPC, 50002 gRPC interno entre sidecars y 9090 métricas), el volumen proyectado `dapr-identity-token` y la variable `DAPR_TRUST_ANCHORS` con el *trust bundle* de Sentry. Lo verifiqué inspeccionando el `spec` del Pod ya mutado. Como el desarrollador nunca escribe ese contenedor en su manifiesto, la única manera transparente de agregarlo es mutar el objeto en la fase de admisión.
 
-Durante el lab encontré dos detalles de diseño que vale la pena resaltar:
-
-- **`failurePolicy: Ignore`:** si el injector está caído, el Pod se crea igual, pero **sin sidecar**. Se prioriza la disponibilidad del clúster sobre la inyección, y el costo es una falla silenciosa (el Pod arranca con `1/1` y la app no encuentra `localhost:3500`).
-- **Control de quién puede pedir inyección:** cuando creé un Pod suelto con `kubectl` para depurar, el injector lo dejó sin sidecar y registró `service account 'kubernetes-admin' not on the list of allowed controller accounts`. Dapr solo inyecta en Pods creados por controladores conocidos (ReplicaSet, Job, StatefulSet, etc.). Así evita que un usuario fabrique un Pod con un `app-id` arbitrario para suplantar la identidad de otro servicio. Por eso hice la depuración con un `Deployment`.
-
 ### 2. Réplicas del `dapr-operator` y comparación con Istio
 
 Está corriendo **1 réplica** del `dapr-operator` (`deployment.apps/dapr-operator 1/1`). Es el valor por defecto del chart. En producción habilitaría `--set global.ha.enabled=true`, que sube a 3 réplicas los componentes sin estado (operator, sentry, injector) y usa *leader election* en el operator.
@@ -79,11 +46,11 @@ Reconstruí el flujo con los logs del injector y del `daprd` del subscriber:
 1. **`kubectl apply`** envía el `Deployment` al **API Server**, que lo autentica, autoriza y persiste en etcd. En ese momento todavía no hay Pods.
 2. El **Deployment controller** crea un `ReplicaSet` y el **ReplicaSet controller** solicita la creación del `Pod` usando la service account `system:serviceaccount:kube-system:replicaset-controller`.
 3. En la fase de **mutating admission**, el API Server encuentra la regla `CREATE pods` de la `MutatingWebhookConfiguration` y envía un `AdmissionReview` por HTTPS al servicio `dapr-sidecar-injector/mutate`. En el log del injector se ve: `AdmissionReview for Kind=/v1, Kind=Pod, Namespace=default ... UserInfo={system:serviceaccount:kube-system:replicaset-controller ...}`.
-4. El injector verifica que exista la anotación `dapr.io/enabled: "true"` y que el solicitante sea un controlador permitido. Luego lee el resto de anotaciones (`app-id`, `app-port`, `config`) y devuelve un **JSON Patch** con el contenedor `daprd` (`ghcr.io/dapr/daprd:1.19.0`) y sus volúmenes y variables. En el log aparece `Sidecar injector succeeded injection for app 'order-subscriber'`.
+4. El injector verifica que exista la anotación `dapr.io/enabled: "true"` y que el solicitante sea un controlador permitido. Luego lee el resto de anotaciones (`app-id`, `app-port`) y devuelve un **JSON Patch** con el contenedor `daprd` (`ghcr.io/dapr/daprd:1.19.0`) y sus volúmenes y variables. En el log aparece `Sidecar injector succeeded injection for app 'order-subscriber'`.
 5. El API Server aplica el patch, ejecuta los webhooks de validación y persiste el Pod ya mutado. El **scheduler** lo asigna a `dapr-lab-control-plane` y el **kubelet** arranca los dos contenedores, por eso `READY 2/2`.
 6. Al arrancar, `daprd` hace su propio *bootstrap* contra el plano de control:
    - `Fetching initial identity` → `Security is initialized successfully`: obtiene de **Sentry** su certificado mTLS a partir del token de la service account.
-   - `Initializing the operator client`: descarga del **operator** los `Component` (`order-pubsub`) y la `Configuration` (`tracing-config`).
+   - `Initializing the operator client`: descarga del **operator** los `Component` (`order-pubsub`).
    - Se conecta a **placement** y **scheduler** para actores y jobs.
    - `application discovered on port 5001`: espera a que Flask escuche en el `app-port`.
    - Hace `GET /dapr/subscribe` a la app (se ve en el log de Flask) y registra la suscripción: `app is subscribed to the following topics: [[orders]] through pubsub=order-pubsub`.
@@ -100,7 +67,7 @@ Reconstruí el flujo con los logs del injector y del `daprd` del subscriber:
 | CRD | Para qué sirve |
 |---|---|
 | `components.dapr.io` | Declara una **implementación concreta** de un building block (p. ej. `pubsub.redis`, `state.postgresql`, `secretstores.kubernetes`) con su metadata de conexión. Es el CRD central de este lab. |
-| `configurations.dapr.io` | Configura el comportamiento del sidecar: tracing (lo usé para poblar el `traceparent`), métricas, mTLS, middlewares HTTP, *feature flags* y políticas de acceso. Se asocia a una app con la anotación `dapr.io/config`. |
+| `configurations.dapr.io` | Configura el comportamiento del sidecar: tracing, métricas, mTLS, middlewares HTTP, *feature flags* y políticas de acceso. Se asocia a una app con la anotación `dapr.io/config`. |
 | `subscriptions.dapr.io` | Permite declarar suscripciones (pubsub + topic + ruta) de forma **declarativa** en YAML, en lugar de hacerlo programáticamente con `GET /dapr/subscribe` como hace nuestro subscriber. Incluye reglas de enrutamiento por contenido y *dead-letter topics*. |
 | `resiliencies.dapr.io` | Define políticas de resiliencia (*retries*, *timeouts*, *circuit breakers*) aplicables a apps, componentes y actores sin tocar código. |
 | `httpendpoints.dapr.io` | Registra endpoints HTTP **externos** (fuera de Dapr) para invocarlos con la API de service invocation, con headers y TLS configurados de forma declarativa. |
