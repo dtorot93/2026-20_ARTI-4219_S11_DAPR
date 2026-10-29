@@ -11,6 +11,9 @@ spec:
       annotations:
         dapr.io/enabled:  "true"
         dapr.io/app-id:   "order-publisher"
+        # Agrego la Configuration de tracing para que el sidecar genere el
+        # traceparent (W3C Trace Context) en cada publicación.
+        dapr.io/config:   "tracing-config"
         # El publisher no necesita dapr.io/app-port porque no recibe llamadas entrantes,
         # solo hace llamadas salientes al sidecar local.
     spec:
@@ -19,4 +22,9 @@ spec:
         - name: order-publisher
           image: order-publisher:latest
           imagePullPolicy: Never   # La imagen se carga localmente con `kind load`
+          env:
+            # Fase 4 — Reto 1: SLA de expiración de las órdenes (2 minutos).
+            # Es una decisión de negocio, por eso la declaro aquí y no en el código.
+            - name: ORDER_TTL_SECONDS
+              value: "120"
   backoffLimit: 0

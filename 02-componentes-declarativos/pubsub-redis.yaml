@@ -7,11 +7,11 @@ spec:
   type: pubsub.redis
   version: v1
   metadata:
-    # TODO 1: Completar el valor de redisHost con el DNS interno de Kubernetes.
-    # Formato: <nombre-del-service>.<namespace>.svc.cluster.local:<puerto>
-    # Pista: ejecuta `kubectl get svc -n redis` para ver el nombre del Service.
+    # TODO 1 (resuelto): uso el FQDN del Service `redis-master` que crea el chart
+    # de Bitnami en el namespace `redis`. Apunto al master (y no a redis-replicas)
+    # porque Redis Streams requiere escrituras (XADD) y las réplicas son de solo lectura.
     - name: redisHost
-      value: "" # <-- COMPLETAR
+      value: "redis-master.redis.svc.cluster.local:6379"
 
     - name: redisPassword
       value: ""

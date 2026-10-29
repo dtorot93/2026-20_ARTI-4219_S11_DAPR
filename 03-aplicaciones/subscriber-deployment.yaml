@@ -23,8 +23,18 @@ spec:
         #
         # Referencia: https://docs.dapr.io/reference/arguments-annotations-overview/
         # ---------------------------------------------------------------------------
-        # TODO: Agregar las anotaciones aquí
-        
+        # TODO 4 (resuelto):
+        # - enabled: le indico al webhook dapr-sidecar-injector que mute el Pod y agregue daprd.
+        # - app-id: identidad lógica del servicio; Dapr la usa como `source` del CloudEvent,
+        #   como consumer group por defecto en Redis y para service invocation.
+        # - app-port: puerto donde escucha Flask; el sidecar lo usa para llamar a
+        #   GET /dapr/subscribe y para entregar los mensajes en POST /orders.
+        dapr.io/enabled:  "true"
+        dapr.io/app-id:   "order-subscriber"
+        dapr.io/app-port: "5001"
+        # Adicional: asocio la Configuration de tracing para que el traceparent
+        # del CloudEvent llegue poblado (ver tracing-config.yaml).
+        dapr.io/config:   "tracing-config"
     spec:
       containers:
         - name: order-subscriber

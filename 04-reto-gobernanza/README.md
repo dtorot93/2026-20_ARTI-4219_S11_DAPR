@@ -97,6 +97,8 @@ En el mismo archivo `04-reto-gobernanza/pubsub-redis-challenge.yaml`, agrega la 
 
 **Pista:** El valor del campo debe contener el marcador `{namespace}` que Dapr reemplazará en runtime por el namespace de Kubernetes donde corre la aplicación.
 
+**Verificación (mi solución):** con `./04-reto-gobernanza/demo-multitenant.sh A` reproduzco la colisión (sin `consumerID`) y con `./04-reto-gobernanza/demo-multitenant.sh B` compruebo el aislamiento por namespace. Los resultados están en `reflexion-arquitectonica.md`.
+
 ---
 
 ## 4.4 Reto 3 — Reflexión Arquitectónica
@@ -117,6 +119,8 @@ Una vez completado el laboratorio:
 
 ```bash
 # Eliminar todos los recursos del lab
+./04-reto-gobernanza/demo-multitenant.sh clean   # namespaces checkout e inventory de mi demo
+kubectl delete -f 03-aplicaciones/tracing-config.yaml --ignore-not-found
 kubectl delete -f 03-aplicaciones/subscriber-deployment.yaml
 kubectl delete -f 03-aplicaciones/publisher-job.yaml            --ignore-not-found
 kubectl delete -f 04-reto-gobernanza/pubsub-redis-challenge.yaml --ignore-not-found

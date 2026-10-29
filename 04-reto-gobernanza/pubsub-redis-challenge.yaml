@@ -21,8 +21,17 @@ spec:
     #
     # Referencia: https://docs.dapr.io/developing-applications/building-blocks/pubsub/pubsub-message-ttl/
     # ---------------------------------------------------------------------------
-    # - name: ???
-    #   value: ???
+    # Resuelto, con un hallazgo de la verificación:
+    # Declaro aquí la política de 120 s, como pide el reto. Sin embargo, en mis
+    # pruebas con Dapr 1.19 + Redis, este valor a nivel de componente NO se
+    # aplicó: el CloudEvent se guardó sin el atributo `expiration` y el mensaje
+    # se entregó a los 130 s. Redis no tiene TTL nativo por mensaje, así que
+    # Dapr lo implementa en el runtime solo cuando el TTL viaja como metadata de
+    # la publicación (`metadata.ttlInSeconds`). Por eso la política efectiva la
+    # hago cumplir con la variable ORDER_TTL_SECONDS del publisher-job.yaml.
+    # Detallo el experimento en reflexion-arquitectonica.md.
+    - name: ttlInSeconds
+      value: "120"
 
     # ---------------------------------------------------------------------------
     # TODO 2: Configurar Consumer Group con Namespace para Multi-Tenancy
@@ -33,5 +42,10 @@ spec:
     #
     # Referencia: https://docs.dapr.io/operations/components/component-scopes/#namespaced-components
     # ---------------------------------------------------------------------------
-    # - name: ???
-    #   value: ???
+    # Resuelto: combino {appID} y {namespace} para que el consumer group sea,
+    # por ejemplo, `order-subscriber-checkout` y `order-subscriber-inventory`.
+    # Así cada namespace obtiene su propio grupo en el stream de Redis y recibe
+    # el 100% de los eventos, mientras que las réplicas dentro de un mismo
+    # namespace siguen compartiendo grupo (competing consumers).
+    - name: consumerID
+      value: "{appID}-{namespace}"
